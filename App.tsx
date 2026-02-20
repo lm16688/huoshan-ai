@@ -38,7 +38,7 @@ import {
   ShieldCheck
 } from 'lucide-react';
 import { AppStatus, SubtitleSegment, VideoMetadata, SubtitleLanguage } from './types';
-import { analyzeVideoWithGemini } from './services/geminiService';
+import { analyzeVideoWithVolcano } from './services/volcanoService';
 
 type Language = 'en' | 'zh';
 type ExportQuality = '480p' | '720p' | '1080p' | '1440p';
@@ -393,7 +393,7 @@ const App: React.FC = () => {
     const url = URL.createObjectURL(file);
     setVideo({ name: file.name, size: file.size, duration: 0, url, file });
     setStatus(AppStatus.ANALYZING);
-    analyzeVideoWithGemini(file, subtitleLang, setProcessingMsg)
+    analyzeVideoWithVolcano(file, subtitleLang, setProcessingMsg)
       .then(res => { setSegments(res); setStatus(AppStatus.READY); })
       .catch(err => {
         if (err?.message?.includes?.('401') || err?.message?.toLowerCase?.()?.includes?.('auth')) {
