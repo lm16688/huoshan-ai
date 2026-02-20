@@ -2,36 +2,20 @@
 import { SubtitleSegment, SubtitleLanguage } from "../types";
 
 /**
- * 将 File 对象转换为 Base64 字符串（分块处理，避免内存溢出）
+ * 将 File 转换为 Data URL（包含 MIME 类型和 Base64 数据）
  */
-const fileToBase64 = (file: File): Promise<string> => {
+const fileToDataURL = (file: File): Promise<string> => {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
-    reader.onload = () => {
-      const arrayBuffer = reader.result as ArrayBuffer;
-      const bytes = new Uint8Array(arrayBuffer);
-      let binary = '';
-      const len = bytes.byteLength;
-      const chunkSize = 8192; // 8KB 分块
-      for (let i = 0; i < len; i += chunkSize) {
-        const chunk = bytes.subarray(i, Math.min(i + chunkSize, len));
-        binary += String.fromCharCode.apply(null, Array.from(chunk));
-      }
-      try {
-        const base64 = btoa(binary);
-        resolve(base64);
-      } catch (e) {
-        reject(new Error("视频文件过大，请尝试压缩后重新上传"));
-      }
-    };
-    reader.readAsArrayBuffer(file);
-    reader.onerror = (error) => reject(error);
+    reader.onload = () => resolve(reader.result as string);
+    reader.onerror = reject;
+    reader.readAsDataURL(file);
   });
 };
 
 /**
- * 调用火山引擎多模态模型分析视频
- * 返回与之前 Gemini 相同的 SubtitleSegment 数组
+ * 调用火山引擎视觉模型（responses API）分析视频
+ * 模型 ID 通过环境变量 VOLC_MODEL_ID 指定，默认为您提供的示例 ID
  */
 export const analyzeVideoWithVolcano = async (
   videoFile: File,
@@ -39,19 +23,22 @@ export const analyzeVideoWithVolcano = async (
   onProgress: (msg: string) => void
 ): Promise<SubtitleSegment[]> => {
   const apiKey = process.env.VOLC_API_KEY;
+  const modelId = process.env.VOLC_MODEL_ID || "ep-20260220203528-5874j"; // 您提供的示例模型 ID
+
   if (!apiKey) {
     throw new Error("缺少火山引擎 API Key，请在环境变量中设置 VOLC_API_KEY");
   }
 
   onProgress("正在准备视频数据...");
-  const base64Video = await fileToBase64(videoFile);
+  const dataUrl = await fileToDataURL(videoFile);
 
-  onProgress(`正在调用火山引擎 AI 分析视频 (目标语言: ${targetLanguage})...`);
+  onProgress(`正在调用火山引擎视觉模型分析视频 (目标语言: ${targetLanguage})...`);
 
   const languagePrompt = targetLanguage === SubtitleLanguage.AUTO
     ? "自动检测视频中的语言。"
     : `将视频中的语音转录并翻译为 ${targetLanguage}。`;
 
+  // 构建系统提示，要求返回字幕 JSON 数组
   const systemPrompt = `你是一名专业的影视剪辑师和语言学家。请对提供的完整视频进行高精度语音转录、语义修剪和时间轴同步。
 
 ${languagePrompt}
@@ -75,30 +62,28 @@ ${languagePrompt}
 
 只返回 JSON 数组，不要包含其他解释文字。`;
 
+  // 构建请求体（符合 responses API 格式）
   const requestBody = {
-    model: "doubao-1-5-vision-pro-32k-250115",
-    messages: [
+    model: modelId,
+    input: [
       {
         role: "user",
         content: [
           {
-            type: "image_url",
-            image_url: {
-              url: `data:${videoFile.type};base64,${base64Video}`,
-            },
+            type: "input_image",
+            image_url: dataUrl, // 使用 Data URL（注意：API 可能期望的是 HTTP URL 或 Base64 编码，这里使用 Data URL）
           },
           {
-            type: "text",
+            type: "input_text",
             text: systemPrompt,
           },
         ],
       },
     ],
-    response_format: { type: "json_object" },
   };
 
   try {
-    const response = await fetch("https://ark.cn-beijing.volces.com/api/v3/chat/completions", {
+    const response = await fetch("https://ark.cn-beijing.volces.com/api/v3/responses", {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -113,12 +98,28 @@ ${languagePrompt}
     }
 
     const data = await response.json();
-    const content = data.choices?.[0]?.message?.content;
-    if (!content) {
-      throw new Error("API 返回内容为空");
+
+    // 打印原始响应以便调试（开发环境可保留，生产环境建议移除）
+    console.log("API 原始响应:", data);
+
+    // 根据 responses API 的实际返回结构提取内容
+    // 假设返回的格式为 { output: [ { content: [ { text: "..." } ] } ] }
+    // 您需要根据火山引擎的实际响应调整下面的解析逻辑
+    let content = "";
+    if (data.output && Array.isArray(data.output)) {
+      // 取第一个输出的文本内容
+      const firstOutput = data.output[0];
+      if (firstOutput.content && Array.isArray(firstOutput.content)) {
+        const textItem = firstOutput.content.find((item: any) => item.type === "output_text");
+        if (textItem) content = textItem.text;
+      }
     }
 
-    // 尝试解析 JSON（可能包含 markdown 代码块，需清洗）
+    if (!content) {
+      throw new Error("API 返回内容为空或格式不符");
+    }
+
+    // 清洗可能的 Markdown 代码块
     let jsonStr = content.trim();
     if (jsonStr.startsWith("```json")) {
       jsonStr = jsonStr.slice(7, -3).trim();
@@ -135,6 +136,6 @@ ${languagePrompt}
     return parsed.sort((a, b) => a.startTime - b.startTime);
   } catch (error: any) {
     console.error("火山引擎调用失败:", error);
-    throw new Error(error?.message || "视频分析失败，请检查 API Key 或网络");
+    throw new Error(error?.message || "视频分析失败，请检查 API Key 或模型 ID");
   }
 };
